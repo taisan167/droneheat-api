@@ -99,3 +99,7 @@ async def serve(sid: str, db: sqlite3.Connection=Depends(get_db)):
 @app.get("/health")
 async def health():
     return {"status":"ok","ts":int(time.time())}
+
+if __name__=="__main__":
+    import uvicorn, os
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
