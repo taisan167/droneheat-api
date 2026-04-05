@@ -1,105 +1,274 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
-import sqlite3, json, os, time
+import os
+from datetime import datetime, timezone
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-DB_PATH = "droneheat.db"
+load_dotenv()
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try: yield conn
-    finally: conn.close()
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS schools (id TEXT PRIMARY KEY, name TEXT, domain TEXT, api_key TEXT UNIQUE, plan TEXT DEFAULT 'basic', created_at TEXT DEFAULT (datetime('now')))")
-    c.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, school_id TEXT, session_id TEXT, url TEXT, event_type TEXT, data TEXT, ts INTEGER, created_at TEXT DEFAULT (datetime('now')))")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_school ON events(school_id)")
-    c.execute("CREATE TABLE IF NOT EXISTS popups (id INTEGER PRIMARY KEY AUTOINCREMENT, school_id TEXT, name TEXT, title TEXT, body TEXT, button_text TEXT DEFAULT '詳しく見る', trigger TEXT DEFAULT 'exit_intent', active INTEGER DEFAULT 1, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
-    schools = [("jaa-yokohama","JAA横浜","jaa-yokohama.jp","key_jaa_yokohama_demo","master"),("pilina","Pilina","pilina-drone.jp","key_pilina_demo","basic"),("autc","AUTC","autc-drone.jp","key_autc_demo","basic"),("skylink","SkyLink Japan","skylink-japan.jp","key_skylink_demo","pro")]
-    for s in schools:
-        c.execute("INSERT OR IGNORE INTO schools (id,name,domain,api_key,plan) VALUES (?,?,?,?,?)", s)
-    c.execute("INSERT OR IGNORE INTO popups (school_id,name,title,body,trigger) VALUES (?,?,?,?,?)", ("jaa-yokohama","メイン","無料説明会を開催中！","今なら受講料10%OFFキャンペーン中","exit_intent"))
-    conn.commit()
-    conn.close()
+SEARCH_QUERIES = [
+    "名古屋駅 ドローンスクール 駅近",
+    "名古屋駅 ドローンスクール 徒歩",
+    "名古屋 ドローンスクール 国家資格",
+    "名古屋 ドローンスクール 国家資格 更新講習",
+    "名古屋駅 国家資格 更新講習 ドローン",
+    "なごのキャンパス ドローンスクール",
+    "DSA ドローンスクール 名古屋",
+]
 
-init_db()
+TARGET_URLS = [
+    "https://coeteco.jp/articles/15007",
+    "https://coeteco.jp/articles/15009",
+]
 
-class EventItem(BaseModel):
-    type: str; sid: str; session: str; url: str; ts: int
-    data: Optional[Dict[str, Any]] = {}
+DSA_KEYWORDS = ["DSA", "なごのキャンパス", "DSAなごのキャンパス"]
 
-class EventBatch(BaseModel):
-    events: List[EventItem]
+SERPAPI_ENDPOINT = "https://serpapi.com/search"
+NOTION_API_VERSION = "2022-06-28"
+NOTION_PAGES_ENDPOINT = "https://api.notion.com/v1/pages"
 
-class PopupUpdate(BaseModel):
-    title: Optional[str]=None; body: Optional[str]=None
-    button_text: Optional[str]=None; trigger: Optional[str]=None; active: Optional[bool]=None
 
-def verify(x_api_key: str=Header(None), db: sqlite3.Connection=Depends(get_db)):
-    if not x_api_key: raise HTTPException(401, "API key required")
-    s = db.execute("SELECT * FROM schools WHERE api_key=?", (x_api_key,)).fetchone()
-    if not s: raise HTTPException(401, "Invalid API key")
-    return dict(s)
+def fetch_search_results(query: str, api_key: str) -> dict:
+    params = {
+        "q": query,
+        "api_key": api_key,
+        "engine": "google",
+        "hl": "ja",
+        "gl": "jp",
+    }
+    response = requests.get(SERPAPI_ENDPOINT, params=params, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
-@app.post("/v1/events")
-async def collect(batch: EventBatch, db: sqlite3.Connection=Depends(get_db)):
-    n = 0
-    for ev in batch.events:
-        s = db.execute("SELECT id FROM schools WHERE id=?", (ev.sid,)).fetchone()
-        if not s: continue
-        db.execute("INSERT INTO events (school_id,session_id,url,event_type,data,ts) VALUES (?,?,?,?,?,?)", (ev.sid,ev.session,ev.url,ev.type,json.dumps(ev.data),ev.ts))
-        n += 1
-    db.commit()
-    return {"ok": True, "inserted": n}
 
-@app.get("/v1/heatmap/clicks")
-async def clicks(url: str, days: int=30, school: dict=Depends(verify), db: sqlite3.Connection=Depends(get_db)):
-    since = int((datetime.now()-timedelta(days=days)).timestamp()*1000)
-    rows = db.execute("SELECT data FROM events WHERE school_id=? AND event_type='click' AND url LIKE ? AND ts>? LIMIT 5000", (school["id"],f"%{url}%",since)).fetchall()
-    pts = []
-    for r in rows:
-        d = json.loads(r["data"] or "{}")
-        if "x" in d: pts.append({"x":d["x"],"y":d["y"],"tag":d.get("tag","")})
-    return {"points": pts, "total": len(pts)}
+def fetch_aio_detail(serpapi_link: str, api_key: str) -> dict:
+    response = requests.get(serpapi_link, params={"api_key": api_key}, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
-@app.get("/v1/stats/summary")
-async def summary(days: int=30, school: dict=Depends(verify), db: sqlite3.Connection=Depends(get_db)):
-    since = int((datetime.now()-timedelta(days=days)).timestamp()*1000)
-    now = int(datetime.now().timestamp()*1000)
-    pv = db.execute("SELECT COUNT(*) as c FROM events WHERE school_id=? AND event_type='pageview' AND ts BETWEEN ? AND ?", (school["id"],since,now)).fetchone()["c"]
-    pages = db.execute("SELECT url, COUNT(*) as pv FROM events WHERE school_id=? AND event_type='pageview' AND ts>? GROUP BY url ORDER BY pv DESC LIMIT 10", (school["id"],since)).fetchall()
-    return {"pv":pv,"pages":[dict(r) for r in pages],"school":dict(school)}
 
-@app.get("/v1/popups")
-async def list_popups(school: dict=Depends(verify), db: sqlite3.Connection=Depends(get_db)):
-    rows = db.execute("SELECT * FROM popups WHERE school_id=?", (school["id"],)).fetchall()
-    return {"popups": [dict(r) for r in rows]}
+def render_text_blocks(text_blocks: list) -> str:
+    lines = []
+    for block in text_blocks:
+        block_type = block.get("type")
+        if block_type == "paragraph":
+            snippet = block.get("snippet", "").strip()
+            if snippet:
+                lines.append(snippet)
+        elif block_type == "list":
+            for item in block.get("list", []):
+                snippet = item.get("snippet", "").strip()
+                if snippet:
+                    lines.append(f"  • {snippet}")
+    return "\n".join(lines)
 
-@app.put("/v1/popups/{pid}")
-async def update_popup(pid: int, body: PopupUpdate, school: dict=Depends(verify), db: sqlite3.Connection=Depends(get_db)):
-    updates = {k:v for k,v in body.dict().items() if v is not None}
-    if not updates: return {"ok":True}
-    clause = ", ".join([f"{k}=?" for k in updates])
-    db.execute(f"UPDATE popups SET {clause} WHERE id=? AND school_id=?", list(updates.values())+[pid,school["id"]])
-    db.commit()
-    return {"ok": True}
 
-@app.get("/v1/popup/serve/{sid}")
-async def serve(sid: str, db: sqlite3.Connection=Depends(get_db)):
-    r = db.execute("SELECT * FROM popups WHERE school_id=? AND active=1 LIMIT 1", (sid,)).fetchone()
-    return {"popup": dict(r) if r else None}
+def collect_sources(text_blocks: list, references: list) -> list:
+    ref_by_index = {r["index"]: r for r in references}
+    seen_links = set()
+    sources = []
 
-@app.get("/health")
-async def health():
-    return {"status":"ok","ts":int(time.time())}
+    def add(title: str, link: str) -> None:
+        if link and link not in seen_links:
+            seen_links.add(link)
+            sources.append({"title": title, "link": link})
 
-if __name__=="__main__":
-    import uvicorn, os
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    for block in text_blocks:
+        for idx in block.get("reference_indexes", []):
+            ref = ref_by_index.get(idx)
+            if ref:
+                add(ref.get("title", "（タイトルなし）"), ref.get("link", ""))
+        for sl in block.get("snippet_links", []):
+            add(sl.get("text", "（タイトルなし）"), sl.get("link", ""))
+        for item in block.get("list", []):
+            for sl in item.get("snippet_links", []):
+                add(sl.get("text", "（タイトルなし）"), sl.get("link", ""))
+
+    return sources
+
+
+def check_target_urls(sources: list) -> list:
+    """引用ソースの中から TARGET_URLS に一致するものを返す"""
+    source_links = {s["link"] for s in sources}
+    return [url for url in TARGET_URLS if url in source_links]
+
+
+def extract_dsa_mentions(full_text: str) -> str:
+    """AIOテキストからDSAキーワードを含む行を抽出する"""
+    mentions = [
+        line.strip()
+        for line in full_text.split("\n")
+        if any(kw in line for kw in DSA_KEYWORDS)
+    ]
+    return "\n".join(mentions)
+
+
+def scrape_coeteco_page(url: str) -> str:
+    """coeteco.jp のページをスクレイピングしてDSA関連テキストを抽出する"""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return f"スクレイピングエラー: {e}"
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    body = soup.find("article") or soup.find("main") or soup.body
+    if not body:
+        return "本文が取得できませんでした"
+
+    dsa_paragraphs = [
+        tag.get_text(strip=True)
+        for tag in body.find_all(["p", "h1", "h2", "h3", "h4", "li"])
+        if any(kw in tag.get_text() for kw in DSA_KEYWORDS)
+    ]
+
+    if dsa_paragraphs:
+        return "\n".join(dsa_paragraphs)
+
+    # DSA言及なし → 冒頭500文字を参考として返す
+    all_text = body.get_text(separator="\n", strip=True)
+    return f"（DSA言及なし）\n{all_text[:500]}"
+
+
+def save_to_notion(
+    query: str,
+    full_text: str,
+    sources: list,
+    has_aio: bool,
+    cited_urls: list,
+    dsa_mentions: str,
+    scraping_content: str,
+) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    sources_text = "\n".join(
+        f"{i}. {s['title']}\n   {s['link']}"
+        for i, s in enumerate(sources, start=1)
+    )[:2000]
+
+    cited_text = "\n".join(cited_urls) if cited_urls else "引用なし"
+
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": NOTION_API_VERSION,
+    }
+    body = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "検索キーワード": {
+                "title": [{"text": {"content": query}}]
+            },
+            "AIOテキスト": {
+                "rich_text": [{"text": {"content": full_text[:2000]}}]
+            },
+            "引用ソース": {
+                "rich_text": [{"text": {"content": sources_text or "なし"}}]
+            },
+            "取得日時": {
+                "date": {"start": now}
+            },
+            "AIO有無": {
+                "checkbox": has_aio
+            },
+            "対象URL引用有無": {
+                "rich_text": [{"text": {"content": cited_text}}]
+            },
+            "DSA言及箇所": {
+                "rich_text": [{"text": {"content": dsa_mentions[:2000] or "なし"}}]
+            },
+            "スクレイピング内容": {
+                "rich_text": [{"text": {"content": scraping_content[:2000] or "なし"}}]
+            },
+        },
+    }
+    response = requests.post(NOTION_PAGES_ENDPOINT, headers=headers, json=body, timeout=30)
+    if not response.ok:
+        print(f"  Notionエラー詳細: {response.text}")
+    response.raise_for_status()
+    print("  → Notionへの保存完了")
+
+
+def process_query(query: str, api_key: str) -> None:
+    print(f"\n{'='*50}")
+    print(f"検索: {query}")
+
+    try:
+        data = fetch_search_results(query, api_key)
+    except requests.exceptions.RequestException as e:
+        print(f"  検索エラー: {e}")
+        return
+
+    aio = data.get("ai_overview")
+
+    if not aio:
+        print("  AIO: なし")
+        save_to_notion(query, "", [], False, [], "", "")
+        return
+
+    # AIO詳細が別エンドポイントにある場合は追加取得
+    serpapi_link = aio.get("serpapi_link")
+    if serpapi_link and not aio.get("text_blocks") and not aio.get("references"):
+        print("  AIOの詳細データを取得中...")
+        try:
+            detail = fetch_aio_detail(serpapi_link, api_key)
+            aio = detail.get("ai_overview", aio)
+        except requests.exceptions.RequestException as e:
+            print(f"  AIO詳細取得エラー: {e}")
+
+    text_blocks = aio.get("text_blocks") or []
+    full_text = render_text_blocks(text_blocks) or aio.get("snippet", "（テキストなし）")
+    references = aio.get("references") or []
+    sources = collect_sources(text_blocks, references)
+
+    print(f"  AIO: あり（引用ソース {len(sources)} 件）")
+
+    # 対象URL引用チェック
+    cited_urls = check_target_urls(sources)
+    print(f"  対象URL引用: {'あり → ' + ', '.join(cited_urls) if cited_urls else 'なし'}")
+
+    # AIOテキスト内のDSA言及抽出
+    dsa_mentions = extract_dsa_mentions(full_text)
+    print(f"  AIO内DSA言及: {'あり' if dsa_mentions else 'なし'}")
+
+    # スクレイピング（対象URLが引用されている場合のみ実行）
+    scraping_parts = []
+    for url in cited_urls:
+        print(f"  スクレイピング: {url}")
+        content = scrape_coeteco_page(url)
+        scraping_parts.append(f"[{url}]\n{content}")
+    scraping_content = "\n\n".join(scraping_parts)
+
+    save_to_notion(query, full_text, sources, True, cited_urls, dsa_mentions, scraping_content)
+
+
+def main() -> None:
+    if not SERPAPI_KEY:
+        print("エラー: SERPAPI_KEY が .env に設定されていません")
+        return
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+        print("エラー: NOTION_TOKEN または NOTION_DATABASE_ID が .env に設定されていません")
+        return
+
+    print(f"クエリ数: {len(SEARCH_QUERIES)} 件")
+    print(f"監視対象URL: {TARGET_URLS}")
+
+    for query in SEARCH_QUERIES:
+        process_query(query, SERPAPI_KEY)
+
+    print("\n全クエリの処理が完了しました。")
+
+
+if __name__ == "__main__":
+    main()
