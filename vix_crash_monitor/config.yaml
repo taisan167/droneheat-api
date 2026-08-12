@@ -1,0 +1,86 @@
+# ============================================================
+# VIX暴落買い監視システム - 分割投資判断支援機能 設定ファイル
+# ============================================================
+# 本システムは投資判断"支援"のみを目的とします。
+# 証券会社への自動発注・自動売買は一切行いません。
+# 最終的な購入判断・実際の発注は必ず人間が行ってください。
+# ============================================================
+
+portfolio:
+  # 暴落買いに充てる投資可能資金（円）
+  crash_buying_budget: 2000000
+  # 1銘柄への累積投入額の上限比率（総予算に対して）
+  max_single_ticker_ratio: 0.25
+  # 同一セクター（テーマ）への投入比率の警告しきい値
+  max_sector_ratio: 0.50
+
+# Stage別 投入比率としきい値
+stage_thresholds:
+  stage1:
+    vix_min: 25
+    nasdaq_drawdown_min_pct: 10
+    allocation_ratio: 0.10
+  stage2:
+    vix_min: 30
+    nasdaq_drawdown_min_pct: 15
+    allocation_ratio: 0.20
+  stage3:
+    vix_min: 40
+    nasdaq_drawdown_min_pct: 20
+    allocation_ratio: 0.30
+  stage4:
+    allocation_ratio: 0.40
+    # 反転確認に必要な最小シグナル数（複数条件の総合判断）
+    min_reversal_signals: 3
+
+# 急落予備警報（PRE-ALERT）
+pre_alert:
+  # VIX前営業日比の上昇率しきい値（%）
+  vix_change_threshold_pct: 20
+  # PRE-ALERTが有効になるVIXの上限（これ未満のときだけ判定対象）
+  vix_ceiling: 25
+
+# 市場全体判断に使う指数のティッカー（yfinance準拠）
+market_indices:
+  vix: "^VIX"
+  nasdaq100: "^NDX"
+  sox: "^SOX"
+  sp500: "^GSPC"
+
+# 銘柄別配分の上位ランク配分ウェイト（上位から順に適用、残りは0円）
+allocation_weights: [0.40, 0.30, 0.20, 0.10]
+
+# 銘柄ランク判定のスコアしきい値
+rank_thresholds:
+  S: 80
+  A: 65
+  B: 50
+  C: 35
+  # 35未満は D
+
+# 監視銘柄とセクター（テーマ）分類
+watchlist:
+  GPU:
+    - NVDA
+    - AMD
+  SEMI_EQUIPMENT:
+    - ASML
+    - AMAT
+    - LRCX
+    - KLAC
+  SEMICONDUCTOR:
+    - AVGO
+    - TSM
+    - MU
+    - ARM
+  BIG_TECH:
+    - MSFT
+    - GOOGL
+    - AMZN
+    - META
+
+# 出力先パス（リポジトリルートからの相対パス、vix_crash_monitor/ 配下）
+paths:
+  state_file: "data/state.json"
+  history_file: "data/history.csv"
+  reports_dir: "reports"
