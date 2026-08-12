@@ -1,3 +1,13 @@
 .env
 .venv/
 __pycache__/
+.pytest_cache/
+
+# vix_crash_monitor: 生成物・投入済み資金の状態ファイルはコミットしない
+vix_crash_monitor/data/*.json
+vix_crash_monitor/data/*.csv
+vix_crash_monitor/reports/*.json
+vix_crash_monitor/reports/*.md
+vix_crash_monitor/reports/*.csv
+!vix_crash_monitor/data/.gitkeep
+!vix_crash_monitor/reports/.gitkeep
