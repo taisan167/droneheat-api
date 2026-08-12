@@ -25,7 +25,12 @@ def check_bad_news(stock: StockData, market: MarketSnapshot) -> NewsCheckResult:
 
     stock_drawdown = stock.drawdown_from_52w_high_pct
     market_drawdown = market.nasdaq_drawdown_pct
-    relative_underperformance = (stock_drawdown - market_drawdown) <= -RELATIVE_UNDERPERFORMANCE_THRESHOLD_PT
+    # どちらかがNone（52週高値データ不足等）の場合は比較不能につき判定しない
+    # （誤ってINDIVIDUAL_RISKと判定しない。データ不足自体は別途警告される）
+    if stock_drawdown is None or market_drawdown is None:
+        relative_underperformance = False
+    else:
+        relative_underperformance = (stock_drawdown - market_drawdown) <= -RELATIVE_UNDERPERFORMANCE_THRESHOLD_PT
 
     single_day_crash = stock.day_change_pct <= SINGLE_DAY_CRASH_THRESHOLD_PCT
 

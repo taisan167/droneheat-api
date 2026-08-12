@@ -67,7 +67,7 @@ def test_single_ticker_cap_enforced(tmp_config):
 
     state = load_state(tmp_config)
     # 既に上限(50万円)近くまで投入済み
-    record_purchase(state, amount=480_000, stage=1, ticker="NVDA")
+    record_purchase(state, tmp_config, amount=480_000, stage=1, ticker="NVDA")
 
     scores = [_score("NVDA", "GPU", 90, "S")]
     candidates, _ = allocate_budget(scores, 200_000, state, tmp_config)

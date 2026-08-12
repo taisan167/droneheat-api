@@ -39,7 +39,7 @@ def allocate_budget(
     top = eligible[: len(config.allocation_weights)]
     weights = _normalized_weights(config.allocation_weights, len(top))
 
-    ticker_cap = round(config.crash_buying_budget * config.max_single_ticker_ratio)
+    ticker_cap = round(state.total_budget * config.max_single_ticker_ratio)
     sector_map = config.ticker_sector_map()
 
     candidates: list[Candidate] = []
@@ -66,6 +66,7 @@ def allocate_budget(
                 rank=score.rank,
                 suggested_amount=int(amount),
                 warnings=warnings,
+                flags=list(score.flags),
                 stock_data=score.stock_data,
             )
         )
@@ -81,6 +82,7 @@ def allocate_budget(
                 rank=score.rank,
                 suggested_amount=0,
                 warnings=list(score.warnings),
+                flags=list(score.flags),
                 stock_data=score.stock_data,
             )
         )

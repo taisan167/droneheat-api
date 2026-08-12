@@ -26,15 +26,23 @@ STAGE_COLORS = {
     1: "#eab308",  # 注意 (yellow)
     2: "#f97316",  # 警戒 (orange)
     3: "#dc2626",  # 強い警戒 (red)
-    4: "#2563eb",  # 反転確認 (blue)
+    4: "#2563eb",  # 反転確認 (blue) ※Stage3より"危険"という意味ではない
 }
 STAGE_TEXT = {
     0: "Stage 0 ／ Neutral（待機）",
     1: "Stage 1 ／ 注意（第1回買い候補）",
     2: "Stage 2 ／ 警戒（第2回買い候補）",
     3: "Stage 3 ／ 強い警戒（暴落買い候補）",
-    4: "Stage 4 ／ 反転確認",
+    4: "Stage 4 ／ 反転確認（RECOVERY_SIGNAL）",
 }
+
+# Stage番号は連番だが危険度が単調に増すスケールではない。0-3は暴落の深刻さ
+# (BUY_STAGE)、4は暴落後の反転確認(RECOVERY_SIGNAL)であり別軸の指標。
+STAGE4_NOTE = (
+    "Stage4は「Stage3よりさらに危険」という意味ではありません。"
+    "暴落の深さを表すStage0〜3(BUY_STAGE)とは別軸で、複数の反転シグナルが"
+    "確認できたことを示す指標(RECOVERY_SIGNAL)です。"
+)
 
 
 def load_json(path: Path) -> dict | None:
@@ -62,6 +70,22 @@ def main() -> None:
         )
         return
 
+    if report.get("data_incomplete") or report.get("market_stage") is None:
+        st.markdown(
+            "<div style='padding:16px;border-radius:8px;background-color:#6b728022;"
+            "border:2px solid #6b7280;'><h3 style='margin:0;color:#6b7280;'>DATA INCOMPLETE</h3>"
+            "<p style='margin:4px 0 0 0;'>市場判定保留（主要データが取得できなかったため、"
+            "Stageの推測は行っていません）</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.write(f"理由: {report.get('reason', '不明')}")
+        st.subheader("資金管理")
+        c1, c2 = st.columns(2)
+        c1.metric("総予算", f"{report['total_budget']:,}円")
+        c2.metric("投入済み", f"{report['deployed_amount']:,}円")
+        st.caption(report.get("disclaimer", ""))
+        return
+
     stage = report.get("market_stage", 0)
     pre_alert = report.get("pre_alert", False)
     color = STAGE_COLORS.get(stage, "#6b7280")
@@ -81,12 +105,15 @@ def main() -> None:
             f"<p style='margin:4px 0 0 0;'>{report.get('status_label','')}</p></div>",
             unsafe_allow_html=True,
         )
+        if stage == 4:
+            st.info(STAGE4_NOTE)
 
     st.markdown("&nbsp;", unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("VIX", f"{report['vix']:.1f}", f"{report['vix_change_pct']:+.1f}%")
-    col2.metric("NASDAQ100 高値比", f"{report['nasdaq_drawdown']:.1f}%")
+    nasdaq_dd = report.get("nasdaq_drawdown")
+    col2.metric("NASDAQ100 高値比", f"{nasdaq_dd:.1f}%" if nasdaq_dd is not None else "N/A（データ不足）")
     sox_dd = report.get("sox_drawdown")
     col3.metric("SOX 高値比", f"{sox_dd:.1f}%" if sox_dd is not None else "N/A")
 
@@ -96,6 +123,12 @@ def main() -> None:
     c2.metric("投入済み", f"{report['deployed_amount']:,}円")
     c3.metric("今回投入候補", f"{report['suggested_new_allocation']:,}円")
     c4.metric("残り", f"{report['remaining_budget_after_candidate_allocation']:,}円")
+    if report.get("suggested_allocation_is_combined_upper_bound"):
+        stages = report.get("suggested_allocation_target_stages", [])
+        st.info(
+            f"今回の投入候補額はStage{min(stages)}〜{max(stages)}の未実行配分を合算した"
+            "「配分上限の目安」です。一括投入を推奨するものではありません。"
+        )
 
     st.subheader("銘柄ランキング")
     candidates = report.get("watchlist_all") or report.get("candidates") or []
@@ -107,6 +140,7 @@ def main() -> None:
                 "スコア": c["score"],
                 "ランク": c["rank"],
                 "投入候補額": f"{c['suggested_amount']:,}円",
+                "フラグ": ", ".join(c.get("flags", [])) or "-",
                 "警告": "; ".join(c.get("warning_details", [])) or "-",
             }
             for c in candidates

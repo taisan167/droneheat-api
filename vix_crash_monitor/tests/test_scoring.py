@@ -89,3 +89,56 @@ def test_relative_underperformance_flagged_and_capped_rank():
     assert result.news.volume_spike is True
     assert result.rank == "D"
     assert any("ニュース確認必要" in w for w in result.warnings)
+
+
+# ---- 見直しレビュー項目10: スコア異常チェック ----
+
+def test_extreme_drop_with_individual_red_flags_is_not_s_ranked():
+    """NASDAQ100-12%に対し、架空銘柄A(-50%, RSI20, 出来高4倍, 当日-20%)は
+    下落率だけ見れば突出しているが、個別リスクフラグにより高ランクにしない。
+    INDIVIDUAL_RISK / NEWS_CHECK_REQUIRED フラグが立つこと。"""
+    market = make_snapshot(nasdaq_price=17160, nasdaq_52w_high=19500)  # -12.0%
+    stock = StockData(
+        ticker="FAKE_A",
+        price=50.0,
+        prev_close=62.5,
+        day_change_pct=-20.0,
+        high_52w=100.0,  # -50%
+        ma200=90.0,
+        rsi14=20.0,
+        avg_volume_30d=1_000_000,
+        volume_today=4_000_000,  # 4x volume
+        pe_ratio=None,
+        revenue_growth_yoy=None,
+    )
+    result = score_stock(stock, market, "OTHER")
+    assert result.rank not in ("S", "A")
+    assert result.rank == "D"
+    assert "INDIVIDUAL_RISK" in result.flags
+    assert "NEWS_CHECK_REQUIRED" in result.flags
+    assert "SINGLE_DAY_CRASH" in result.flags
+    assert "VOLUME_SPIKE" in result.flags
+
+
+def test_missing_52w_high_does_not_inflate_score():
+    """52週高値データが無い(None)場合、下落率不明として加点せず、
+    誤って高スコア・高ランクにしない（見直しレビュー項目5・10）。"""
+    market = make_snapshot(nasdaq_price=17550, nasdaq_52w_high=19500)
+    stock = StockData(
+        ticker="NEWCO",
+        price=50.0,
+        prev_close=51.0,
+        day_change_pct=-2.0,
+        high_52w=None,  # データ不足（新規上場等）
+        ma200=None,
+        rsi14=None,
+        avg_volume_30d=1_000_000,
+        volume_today=1_100_000,
+        pe_ratio=None,
+        revenue_growth_yoy=None,
+    )
+    result = score_stock(stock, market, "OTHER")
+    assert result.components["drawdown"] == 0
+    assert result.rank != "S"
+    assert "FIFTY_TWO_WEEK_HIGH_UNAVAILABLE" in result.flags
+    assert any("52週高値データ不足" in w for w in result.warnings)

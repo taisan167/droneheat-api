@@ -21,7 +21,9 @@ from vix_crash_monitor.news_check import check_bad_news
 RELATIVE_UNDERPERFORMANCE_THRESHOLD_PT = 10.0
 
 
-def _drawdown_score(drawdown_pct: float) -> int:
+def _drawdown_score(drawdown_pct: float | None) -> int:
+    if drawdown_pct is None:
+        return 0  # 52週高値データが無い場合は加点しない（誤った高スコアを作らない）
     dd = abs(min(0.0, drawdown_pct))
     return max(0, min(25, round(dd * 0.9)))
 
@@ -55,7 +57,9 @@ def _ma200_score(deviation_pct: float | None) -> int:
     return 5
 
 
-def _relative_score(stock_drawdown_pct: float, market_drawdown_pct: float) -> tuple[int, bool]:
+def _relative_score(stock_drawdown_pct: float | None, market_drawdown_pct: float | None) -> tuple[int, bool]:
+    if stock_drawdown_pct is None or market_drawdown_pct is None:
+        return 7, False  # 比較不能: 中立点（過大評価も個別リスク誤判定もしない）
     diff = stock_drawdown_pct - market_drawdown_pct  # 負値=市場より下げがきつい(個別要因の疑い)
     if diff <= -RELATIVE_UNDERPERFORMANCE_THRESHOLD_PT:
         return 0, True
@@ -143,9 +147,10 @@ def score_stock(stock: StockData, market: MarketSnapshot, sector: str) -> StockS
             stock_data=stock,
             news=news,
             warnings=["価格データ取得不可のため評価できません"],
+            flags=["DATA_UNAVAILABLE"],
         )
 
-    relative_score, underperform_flag = _relative_score(
+    relative_score, _underperform_flag = _relative_score(
         stock.drawdown_from_52w_high_pct, market.nasdaq_drawdown_pct
     )
 
@@ -167,6 +172,12 @@ def score_stock(stock: StockData, market: MarketSnapshot, sector: str) -> StockS
         components=components,
     )
 
+    warnings = news.warnings()
+    flags = news.flags()
+    if not stock.has_52w_high_data:
+        warnings.append("52週高値データ不足のため下落率評価不可（N/A扱い）")
+        flags.append("FIFTY_TWO_WEEK_HIGH_UNAVAILABLE")
+
     return StockScore(
         ticker=stock.ticker,
         sector=sector,
@@ -175,7 +186,8 @@ def score_stock(stock: StockData, market: MarketSnapshot, sector: str) -> StockS
         components=components,
         stock_data=stock,
         news=news,
-        warnings=news.warnings(),
+        warnings=warnings,
+        flags=flags,
     )
 
 

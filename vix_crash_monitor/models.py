@@ -13,13 +13,15 @@ from datetime import datetime
 class MarketSnapshot:
     """市場全体のスナップショット（1時点分）。バックテストでも同じ形を使う。"""
 
-    timestamp: datetime
+    timestamp: datetime  # tz-aware。市場データはAmerica/New_York基準で取得する（timeutil.py参照）
 
     vix: float
     vix_prev_close: float
 
     nasdaq_price: float
-    nasdaq_52w_high: float
+    # 直近252営業日のデータが無い場合はNone（"N/A"）とする。0.0など実在しうる値に
+    # フォールバックしない＝誤った下落率を作らないため（見直しレビュー項目5）。
+    nasdaq_52w_high: float | None
     nasdaq_5dma: float | None = None
     nasdaq_prev_day_high: float | None = None
 
@@ -45,9 +47,12 @@ class MarketSnapshot:
         return (self.vix - self.vix_prev_close) / self.vix_prev_close * 100.0
 
     @property
-    def nasdaq_drawdown_pct(self) -> float:
-        if not self.nasdaq_52w_high:
-            return 0.0
+    def nasdaq_drawdown_pct(self) -> float | None:
+        """NASDAQ100の52週高値比の下落率。52週高値がN/A(None)の場合はNoneを返す
+        （0%と誤解されるような値を作らない。呼び出し側はNoneを"データ不足"として扱うこと）。
+        """
+        if self.nasdaq_52w_high is None or self.nasdaq_52w_high <= 0:
+            return None
         return (self.nasdaq_price - self.nasdaq_52w_high) / self.nasdaq_52w_high * 100.0
 
     @property
@@ -61,6 +66,13 @@ class MarketSnapshot:
         if not self.sp500_price or not self.sp500_52w_high:
             return None
         return (self.sp500_price - self.sp500_52w_high) / self.sp500_52w_high * 100.0
+
+    @property
+    def has_required_data(self) -> bool:
+        """Stage判定に最低限必要なデータ（VIX・NASDAQ100下落率）が揃っているか。
+        Falseの場合、Stage判定は行わず DATA_INCOMPLETE として扱うこと。
+        """
+        return self.nasdaq_drawdown_pct is not None
 
     @property
     def vix_drop_from_peak_pct(self) -> float | None:
@@ -112,12 +124,21 @@ class ReversalSignals:
 
 @dataclass
 class StageResult:
-    """市場Stage判定結果"""
+    """市場Stage判定結果
 
-    stage: int  # 0-4
-    status_code: str  # WAITING / STAGE1 / STAGE2 / STAGE3 / REVERSAL_CONFIRMED
+    【重要】stage番号(0〜4)は便宜上の連番だが、危険度が単調に増していく
+    スケールではない。Stage0〜3は「暴落の深刻さ」を表す BUY_STAGE、
+    Stage4は暴落そのものではなく「暴落後に反転の兆候が複数確認できた」
+    ことを表す RECOVERY_SIGNAL であり、Stage3より"危険"という意味ではない。
+    category フィールドでこれを明示する（詳細な設計分離は別Issueで検討）。
+    """
+
+    stage: int | None  # 0-4 / データ不足時はNone
+    category: str  # "BUY_STAGE" | "RECOVERY_SIGNAL" | "NONE"
+    status_code: str  # WAITING / STAGE1 / STAGE2 / STAGE3 / REVERSAL_CONFIRMED / DATA_INCOMPLETE
     status_label_jp: str  # 日本語表示ラベル
     pre_alert: bool = False
+    data_incomplete: bool = False
     reversal_signals: ReversalSignals | None = None
     reasons: list[str] = field(default_factory=list)
 
@@ -131,7 +152,8 @@ class StockData:
     prev_close: float
     day_change_pct: float
 
-    high_52w: float
+    # 直近252営業日のデータが無い場合はNone（"N/A"）。誤った下落率を作らないため。
+    high_52w: float | None
     ma200: float | None
     rsi14: float | None
 
@@ -145,10 +167,15 @@ class StockData:
     data_available: bool = True  # データ取得に失敗した場合 False
 
     @property
-    def drawdown_from_52w_high_pct(self) -> float:
+    def drawdown_from_52w_high_pct(self) -> float | None:
+        """52週高値データが無い(None)場合はNoneを返す（0%として扱わない）。"""
         if not self.high_52w:
-            return 0.0
+            return None
         return (self.price - self.high_52w) / self.high_52w * 100.0
+
+    @property
+    def has_52w_high_data(self) -> bool:
+        return self.high_52w is not None and self.high_52w > 0
 
     @property
     def ma200_deviation_pct(self) -> float | None:
@@ -203,6 +230,25 @@ class NewsCheckResult:
             w.append("ニュース確認必要（自動判定不可の悪材料項目あり）")
         return w
 
+    def flags(self) -> list[str]:
+        """機械可読タグ（ダッシュボード/JSON連携向け）。単純な下落率の大きさだけで
+        高ランクにしないよう、これらのフラグをランク判定で優先する（見直しレビュー項目10）。
+        """
+        f = []
+        if self.has_critical_flag:
+            f.append("INDIVIDUAL_RISK")
+        if self.relative_underperformance:
+            f.append("RELATIVE_UNDERPERFORMANCE")
+        if self.single_day_crash:
+            f.append("SINGLE_DAY_CRASH")
+        if self.volume_spike:
+            f.append("VOLUME_SPIKE")
+        if self.earnings_recent:
+            f.append("EARNINGS_RECENT")
+        if self.needs_news_check:
+            f.append("NEWS_CHECK_REQUIRED")
+        return f
+
 
 @dataclass
 class StockScore:
@@ -216,6 +262,7 @@ class StockScore:
     stock_data: StockData
     news: NewsCheckResult
     warnings: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)  # 機械可読タグ（INDIVIDUAL_RISK等）
 
 
 @dataclass
@@ -228,4 +275,5 @@ class Candidate:
     rank: str
     suggested_amount: int
     warnings: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
     stock_data: StockData | None = None

@@ -31,24 +31,42 @@ from vix_crash_monitor import data_fetch
 from vix_crash_monitor.allocation import allocate_budget
 from vix_crash_monitor.config import load_config
 from vix_crash_monitor.history import append_history
-from vix_crash_monitor.portfolio_state import load_state, record_purchase, save_state
-from vix_crash_monitor.report import write_reports
+from vix_crash_monitor.portfolio_state import PortfolioStateError, load_state, record_purchase, save_state
+from vix_crash_monitor.report import write_data_incomplete_report, write_reports
 from vix_crash_monitor.scoring import score_watchlist
 from vix_crash_monitor.stage_logic import compute_suggested_allocation, determine_stage
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    state = load_state(config)
+    try:
+        state = load_state(config)
+    except PortfolioStateError as e:
+        print(f"状態ファイルエラー: {e}", file=sys.stderr)
+        return 1
 
+    # 実データ取得に失敗した場合、合成データへの自動フォールバックは行わない
+    # （見直しレビュー項目8）。取得できなければDATA INCOMPLETEとして停止する。
     try:
         snapshot = data_fetch.fetch_market_snapshot(config)
     except data_fetch.DataFetchError as e:
-        print(f"市場データ取得エラー: {e}", file=sys.stderr)
+        text_report, _json_report = write_data_incomplete_report(config, state, reason=str(e))
+        print(text_report)
+        print(f"\n市場データ取得エラー詳細: {e}", file=sys.stderr)
         return 1
 
     stage_result = determine_stage(snapshot, config, completed_stages=state.completed_stages)
     suggested_total, target_stages = compute_suggested_allocation(stage_result, config, state.completed_stages)
+
+    # 不変条件: 投入候補額は残資金を超えてはならない。超える場合は憶測で
+    # 補正せず処理を停止する（見直しレビュー項目11）。
+    if suggested_total > state.remaining_amount:
+        print(
+            f"エラー: 投入候補額（{suggested_total:,}円）が残り投資可能額"
+            f"（{state.remaining_amount:,}円）を超えています。state.jsonまたはconfig.yamlを確認してください。",
+            file=sys.stderr,
+        )
+        return 1
 
     stock_data = data_fetch.fetch_watchlist_data(config.all_tickers())
     scores = score_watchlist(stock_data, snapshot, config)
@@ -56,25 +74,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     candidates, sector_warnings = allocate_budget(scores, suggested_total, state, config)
 
     text_report, json_report, _ = write_reports(
-        config, snapshot, stage_result, state, suggested_total, candidates, sector_warnings
+        config, snapshot, stage_result, state, suggested_total, candidates, sector_warnings, target_stages=target_stages
     )
     append_history(config, snapshot, stage_result, suggested_total, state)
 
     print(text_report)
-    if target_stages:
-        print(f"\n(対象Stage: {target_stages} / 未完了分のみ集計)")
     return 0
 
 
 def cmd_record_buy(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    state = load_state(config)
     try:
-        record_purchase(state, amount=args.amount, stage=args.stage, ticker=None, note=args.note or "")
-    except ValueError as e:
+        state = load_state(config)
+        record_purchase(state, config, amount=args.amount, stage=args.stage, ticker=None, note=args.note or "")
+        save_state(state, config)
+    except PortfolioStateError as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 1
-    save_state(state, config)
     print(f"記録しました: Stage {args.stage} / {args.amount:,}円")
     print(f"投入済み合計: {state.deployed_amount:,}円 / 残り: {state.remaining_amount:,}円")
     return 0
@@ -82,7 +98,11 @@ def cmd_record_buy(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    state = load_state(config)
+    try:
+        state = load_state(config)
+    except PortfolioStateError as e:
+        print(f"状態ファイルエラー: {e}", file=sys.stderr)
+        return 1
     print(f"総予算: {state.total_budget:,}円")
     print(f"投入済み: {state.deployed_amount:,}円")
     print(f"残り: {state.remaining_amount:,}円")

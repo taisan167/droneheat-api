@@ -17,20 +17,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vix_crash_monitor.config import load_config
-from vix_crash_monitor.portfolio_state import load_state, record_purchase, save_state
+from vix_crash_monitor.portfolio_state import PortfolioStateError, load_state, record_purchase, save_state
 
 
 def cmd_record(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    state = load_state(config)
     try:
+        state = load_state(config)
         record_purchase(
-            state, amount=args.amount, stage=args.stage, ticker=args.ticker, note=args.note or ""
+            state, config, amount=args.amount, stage=args.stage, ticker=args.ticker, note=args.note or ""
         )
-    except ValueError as e:
+        save_state(state, config)
+    except PortfolioStateError as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 1
-    save_state(state, config)
     stage_str = f"Stage {args.stage}" if args.stage is not None else "(Stage未指定)"
     print(f"記録しました: {args.ticker}  {args.amount:,}円  {stage_str}")
     print(f"{args.ticker} 累積投入額: {state.ticker_deployed_amount(args.ticker):,}円")
@@ -40,7 +40,11 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    state = load_state(config)
+    try:
+        state = load_state(config)
+    except PortfolioStateError as e:
+        print(f"状態ファイルエラー: {e}", file=sys.stderr)
+        return 1
     sector_map = config.ticker_sector_map()
     totals: dict = {}
     for p in state.purchases:

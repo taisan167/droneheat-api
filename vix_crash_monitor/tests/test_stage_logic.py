@@ -143,3 +143,119 @@ def test_pure_vix_drop_alone_is_not_enough_for_stage4(config):
     )
     result = determine_stage(snap, config, completed_stages=[1, 2, 3])
     assert result.stage == 3
+
+
+# ---- 見直しレビュー項目1: 資金二重計上チェック ----
+
+def test_no_double_allocation_on_stage_re_entry(config):
+    """Stage1到達→record-buy記録→Stage0に戻る→再びStage1に該当、しても
+    投入候補は再表示されない（人間が記録済みのStageは二重計上しない）。"""
+    stage1_snap = make_snapshot(vix=26.0, nasdaq_price=17400, nasdaq_52w_high=19500)  # -10.8%
+    result = determine_stage(stage1_snap, config)
+    assert result.stage == 1
+    amount, stages = compute_suggested_allocation(result, config, completed_stages=[])
+    assert amount == 200_000
+    assert stages == [1]
+
+    # 人間がrecord-buyで記録した想定 → completed_stages=[1]
+    completed_stages = [1]
+
+    waiting_snap = make_snapshot(vix=18.0, nasdaq_price=19000, nasdaq_52w_high=19500)
+    waiting_result = determine_stage(waiting_snap, config, completed_stages=completed_stages)
+    assert waiting_result.stage == 0
+
+    stage1_again = determine_stage(stage1_snap, config, completed_stages=completed_stages)
+    assert stage1_again.stage == 1
+    amount2, stages2 = compute_suggested_allocation(stage1_again, config, completed_stages)
+    assert amount2 == 0
+    assert stages2 == []
+
+
+# ---- 見直しレビュー項目2: Stage飛び越しテスト ----
+
+def test_stage_skip_from_zero_to_three_combines_all_unexecuted_stages(config):
+    """Stage0から一気にStage3に到達した場合、Stage1+2+3の未実行配分合計
+    (10%+20%+30%=60%=120万円)が提示される。ただし一括購入の指示ではない
+    （文言の検証はreport.pyのテストで行う）。"""
+    snap = make_snapshot(vix=45.0, nasdaq_price=14625, nasdaq_52w_high=19500)  # -25%
+    result = determine_stage(snap, config, completed_stages=[])
+    assert result.stage == 3
+    amount, stages = compute_suggested_allocation(result, config, completed_stages=[])
+    assert amount == 1_200_000
+    assert stages == [1, 2, 3]
+
+
+# ---- 見直しレビュー項目3: Stage低下後の挙動 ----
+
+def test_completed_stages_not_resuggested_after_vix_round_trip(config):
+    """VIX 42 → 28 → 33 と変動しても、既に完了したStage1・2は再提示されない。"""
+    high_vix_snap = make_snapshot(vix=42.0, nasdaq_price=14625, nasdaq_52w_high=19500)  # -25%, stage3
+    result1 = determine_stage(high_vix_snap, config, completed_stages=[])
+    assert result1.stage == 3
+    amount1, stages1 = compute_suggested_allocation(result1, config, completed_stages=[])
+    assert stages1 == [1, 2, 3]
+    completed_stages = [1, 2, 3]  # 人間が全額記録した想定
+
+    low_vix_snap = make_snapshot(vix=28.0, nasdaq_price=18800, nasdaq_52w_high=19500)  # -3.6%
+    result2 = determine_stage(low_vix_snap, config, completed_stages=completed_stages)
+    assert result2.stage == 0
+
+    mid_vix_snap = make_snapshot(vix=33.0, nasdaq_price=16380, nasdaq_52w_high=19500)  # -16%, stage2条件
+    result3 = determine_stage(mid_vix_snap, config, completed_stages=completed_stages)
+    assert result3.stage == 2
+    amount3, stages3 = compute_suggested_allocation(result3, config, completed_stages)
+    assert amount3 == 0
+    assert stages3 == []
+
+
+# ---- 見直しレビュー項目4: BUY_STAGE / RECOVERY_SIGNAL カテゴリ ----
+
+def test_stage_category_buy_stage_for_0_to_3(config):
+    for vix, price, note in [
+        (18.0, 19000, "stage0"),
+        (26.0, 17400, "stage1"),
+        (31.4, 16340, "stage2"),
+        (45.0, 14000, "stage3"),
+    ]:
+        snap = make_snapshot(vix=vix, nasdaq_price=price, nasdaq_52w_high=19500)
+        result = determine_stage(snap, config)
+        assert result.category == "BUY_STAGE", note
+
+
+def test_stage_category_recovery_signal_for_stage4(config):
+    snap = make_snapshot(
+        vix=32.0,
+        nasdaq_price=14200,
+        nasdaq_52w_high=19500,
+        vix_recent_peak=45.0,
+        nasdaq_5dma=14000,
+        nasdaq_prev_day_high=14100,
+        nasdaq_rsi=38,
+        sox_price=4000,
+        sox_52w_high=5200,
+    )
+    result = determine_stage(snap, config, completed_stages=[1, 2, 3])
+    assert result.stage == 4
+    assert result.category == "RECOVERY_SIGNAL"
+
+
+# ---- 見直しレビュー項目5/7: データ不足 → DATA_INCOMPLETE ----
+
+def test_data_incomplete_when_nasdaq_52w_high_missing(config):
+    """NASDAQ100の52週高値がNone（データ不足）の場合、憶測でStage判定しない。"""
+    snap = make_snapshot(vix=45.0, nasdaq_price=14000, nasdaq_52w_high=None)
+    result = determine_stage(snap, config)
+    assert result.stage is None
+    assert result.data_incomplete is True
+    assert result.status_code == "DATA_INCOMPLETE"
+    assert result.category == "NONE"
+
+    amount, stages = compute_suggested_allocation(result, config, completed_stages=[])
+    assert amount == 0
+    assert stages == []
+
+
+def test_market_snapshot_drawdown_none_when_52w_high_missing():
+    snap = make_snapshot(nasdaq_52w_high=None)
+    assert snap.nasdaq_drawdown_pct is None
+    assert snap.has_required_data is False

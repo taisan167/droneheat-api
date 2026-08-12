@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 
 from vix_crash_monitor.config import Config, load_config
-from vix_crash_monitor.data_fetch import compute_rsi
+from vix_crash_monitor.data_fetch import compute_rsi, fifty_two_week_high
 from vix_crash_monitor.models import MarketSnapshot
 from vix_crash_monitor.stage_logic import compute_suggested_allocation, determine_stage
 
@@ -70,7 +70,7 @@ def load_historical_snapshots(config: Config, start: str, end: str) -> list[Mark
         vix_peak = float(vix_window["Close"].tail(30).max())
 
         nasdaq_price = float(ndx_window["Close"].iloc[-1])
-        nasdaq_52w_high = float(ndx_window["High"].tail(252).max())
+        nasdaq_52w_high = fifty_two_week_high(ndx_window)  # データ不足期間はNone("N/A")
         nasdaq_5dma = float(ndx_window["Close"].tail(5).mean())
         nasdaq_prev_high = float(ndx_window["High"].iloc[-2])
         nasdaq_rsi = compute_rsi(ndx_window["Close"])
@@ -80,7 +80,7 @@ def load_historical_snapshots(config: Config, start: str, end: str) -> list[Mark
             sox_window = sox_hist.loc[:date]
             if len(sox_window) > 0:
                 sox_price = float(sox_window["Close"].iloc[-1])
-                sox_52w_high = float(sox_window["High"].tail(252).max())
+                sox_52w_high = fifty_two_week_high(sox_window)
 
         snapshots.append(
             MarketSnapshot(
@@ -127,9 +127,13 @@ def run_backtest(snapshots: list[MarketSnapshot], config: Config) -> pd.DataFram
                 "date": snapshot.timestamp.strftime("%Y-%m-%d"),
                 "vix": round(snapshot.vix, 2),
                 "vix_change_pct": round(snapshot.vix_change_pct, 2),
-                "nasdaq_drawdown_pct": round(snapshot.nasdaq_drawdown_pct, 2),
-                "stage": stage_result.stage,
+                "nasdaq_drawdown_pct": round(snapshot.nasdaq_drawdown_pct, 2)
+                if snapshot.nasdaq_drawdown_pct is not None
+                else None,
+                "stage": stage_result.stage,  # データ不足期間はNone（DATA_INCOMPLETE）
+                "stage_category": stage_result.category,
                 "pre_alert": stage_result.pre_alert,
+                "data_incomplete": stage_result.data_incomplete,
                 "status": stage_result.status_label_jp,
                 "simulated_new_allocation": suggested_total,
                 "simulated_cumulative_deployed": cumulative_deployed,
@@ -161,7 +165,11 @@ def main() -> int:
     df.to_csv(output, index=False)
 
     print(f"結果を保存しました: {output}")
-    print(df[df["stage"] > 0].to_string(index=False))
+    active = df[df["stage"].notna() & (df["stage"] > 0)]
+    print(active.to_string(index=False))
+    incomplete_days = int(df["data_incomplete"].sum())
+    if incomplete_days:
+        print(f"\n(注: データ不足でDATA_INCOMPLETEとなった日数: {incomplete_days})")
     return 0
 
 

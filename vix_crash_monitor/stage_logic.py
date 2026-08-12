@@ -17,8 +17,14 @@ STATUS_LABELS = {
     1: ("STAGE1", "第1回分割買い候補"),
     2: ("STAGE2", "強い調整局面。第2回分割買い候補"),
     3: ("STAGE3", "市場パニック級。長期投資候補を精査"),
-    4: ("REVERSAL_CONFIRMED", "反転確認候補"),
+    4: ("REVERSAL_CONFIRMED", "反転確認候補（Stage3までの暴落度合いとは別軸の指標）"),
 }
+
+# Stage番号は連番だが危険度が単調に増すスケールではない。
+# 0-3は「暴落の深刻さ」を表すBUY_STAGE、4は暴落そのものではなく
+# 「複数の反転シグナルが確認できた」ことを表すRECOVERY_SIGNALであり、
+# Stage3より危険ということではない（見直しレビュー項目4）。
+STAGE_CATEGORY = {0: "BUY_STAGE", 1: "BUY_STAGE", 2: "BUY_STAGE", 3: "BUY_STAGE", 4: "RECOVERY_SIGNAL"}
 
 
 def is_pre_alert(snapshot: MarketSnapshot, config: Config) -> bool:
@@ -89,8 +95,24 @@ def determine_stage(
 
     completed_stagesはStage4の反転確認判定を行うために使う
     （Stage3まで到達済みの場合のみStage4の反転確認評価を行う）。
+
+    VIXまたはNASDAQ100の52週高値等、判定に必須のデータが欠けている場合は
+    stage=None・status_code="DATA_INCOMPLETE"を返す。憶測でStageを判定
+    しない（見直しレビュー項目7）。
     """
     completed_stages = completed_stages or []
+
+    if not snapshot.has_required_data:
+        return StageResult(
+            stage=None,
+            category="NONE",
+            status_code="DATA_INCOMPLETE",
+            status_label_jp="市場判定保留（主要データ取得不可のためStage判定を行いません）",
+            pre_alert=False,
+            data_incomplete=True,
+            reasons=["NASDAQ100の52週高値データ、または市場データが取得できませんでした"],
+        )
+
     reasons: list[str] = []
 
     pre_alert = is_pre_alert(snapshot, config)
@@ -118,6 +140,7 @@ def determine_stage(
                 )
                 return StageResult(
                     stage=4,
+                    category=STAGE_CATEGORY[4],
                     status_code=code4,
                     status_label_jp=label4,
                     pre_alert=False,
@@ -129,6 +152,7 @@ def determine_stage(
             )
             return StageResult(
                 stage=3,
+                category=STAGE_CATEGORY[3],
                 status_code=code,
                 status_label_jp=label,
                 pre_alert=False,
@@ -136,33 +160,42 @@ def determine_stage(
                 reasons=reasons,
             )
 
-        return StageResult(stage=3, status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons)
+        return StageResult(
+            stage=3, category=STAGE_CATEGORY[3], status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons
+        )
 
     if _meets_stage(snapshot, config, 2):
         code, label = STATUS_LABELS[2]
         reasons.append(
             f"VIX={snapshot.vix:.1f}(>=30) かつ NASDAQ100高値比{snapshot.nasdaq_drawdown_pct:.1f}%(<=-15%)"
         )
-        return StageResult(stage=2, status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons)
+        return StageResult(
+            stage=2, category=STAGE_CATEGORY[2], status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons
+        )
 
     if _meets_stage(snapshot, config, 1):
         code, label = STATUS_LABELS[1]
         reasons.append(
             f"VIX={snapshot.vix:.1f}(>=25) かつ NASDAQ100高値比{snapshot.nasdaq_drawdown_pct:.1f}%(<=-10%)"
         )
-        return StageResult(stage=1, status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons)
+        return StageResult(
+            stage=1, category=STAGE_CATEGORY[1], status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons
+        )
 
     code, label = STATUS_LABELS[0]
     if pre_alert:
         # PRE-ALERTはStage0の一種だが表示文言のみ差し替える。投入候補は常に0円。
         return StageResult(
             stage=0,
+            category=STAGE_CATEGORY[0],
             status_code="PRE_ALERT",
             status_label_jp="市場ストレス急上昇。まだ購入せず監視強化",
             pre_alert=True,
             reasons=reasons,
         )
-    return StageResult(stage=0, status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons)
+    return StageResult(
+        stage=0, category=STAGE_CATEGORY[0], status_code=code, status_label_jp=label, pre_alert=False, reasons=reasons
+    )
 
 
 def compute_suggested_allocation(
@@ -170,14 +203,21 @@ def compute_suggested_allocation(
     config: Config,
     completed_stages: list[int],
 ) -> tuple[int, list[int]]:
-    """今回投入候補の総額と、対象となるStage番号一覧を返す。
+    """今回投入候補の総額（＝未実行Stage配分の合計"上限"）と、対象となる
+    Stage番号一覧を返す。
 
-    - PRE-ALERTやStage0では常に0円。
+    - DATA_INCOMPLETE（stage=None）・PRE-ALERT・Stage0では常に0円。
     - すでに完了済みのStageは再度候補にしない（Stage 1完了済みなら
-      再度Stage1条件に該当しても追加投入候補は0円）。
+      再度Stage1条件に該当しても追加投入候補は0円＝資金の二重計上防止）。
     - Stage2/3に直接到達した場合は、未完了の下位Stage分もまとめて候補にする
       （例: 一気にStage3まで急落した場合、Stage1+2+3の合計を提示）。
+
+    【重要】この戻り値は「一括で今すぐ全額投入すべき」という指示ではなく、
+    未実行Stage分を合算した"配分上限の目安"に過ぎない。実際に何回に分けて
+    投入するかは人間が判断すること（呼び出し側の表示文言でも明示する）。
     """
+    if stage_result.data_incomplete or stage_result.stage is None:
+        return 0, []
     if stage_result.pre_alert or stage_result.stage == 0:
         return 0, []
 
